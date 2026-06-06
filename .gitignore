@@ -1,0 +1,8 @@
+# Arquivos compilados Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Arquivo do Windows Explorer
+desktop.ini
+Thumbs.db
