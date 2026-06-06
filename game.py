@@ -263,7 +263,7 @@ class Game:
             import math
             brilho = int(brilho_base * (0.7 + 0.3 * math.sin(self.frame_contador * 0.03 + i)))
             brilho = max(60, min(255, brilho))
-            cor = (brilho, brilho, brilho + 20)  # Levemente azulado
+            cor = (brilho, brilho, min(255, brilho + 20))  # Levemente azulado
             pygame.draw.circle(self.tela, cor, (x, y), raio)
 
     def _desenhar_particulas(self):
