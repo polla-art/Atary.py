@@ -1,57 +1,56 @@
 # =============================================================================
-# game.py — Motor central do jogo
-# Orquestra o loop, spawning, colisões, pontuação e dificuldade progressiva
+# game.py — Motor central do jogo (Fase 1 e Fase 2)
 # =============================================================================
 
 import pygame
 import random
+import math
 from settings import (
     SCREEN_WIDTH, SCREEN_HEIGHT, FPS,
     COLOR_BG, COLOR_STAR, NUM_STARS,
     ASTEROID_BASE_SPEED, ASTEROID_SPEED_INCREMENT,
-    ASTEROID_SPAWN_RATE, ASTEROID_SPAWN_RATE_MIN, ASTEROID_SPAWN_REDUCE
+    ASTEROID_SPAWN_RATE, ASTEROID_SPAWN_RATE_MIN, ASTEROID_SPAWN_REDUCE,
+    POWERUP_TRIGGER, FASE2_SPEED_BONUS
 )
 from player   import Player
 from bullet   import Bullet
 from asteroid import Asteroid
+from powerup  import Powerup
 from hud      import HUD
 
 
 class Game:
     """Motor central do jogo.
-    
+
     Gerencia:
-    - O loop principal (eventos, atualização, renderização)
-    - O fundo estrelado animado
-    - O spawn progressivo de asteroides
-    - As detecções de colisão (bala×asteroide, nave×asteroide, asteroide×fundo)
-    - A pontuação e o aumento gradual de dificuldade
-    - Os estados: INÍCIO, JOGANDO, GAME OVER
+    - Loop principal (eventos, atualização, renderização)
+    - Fundo estrelado animado
+    - Spawn de asteroides com dificuldade progressiva
+    - Detecção de colisões (bala×asteroide, nave×asteroide, nave×powerup)
+    - Sistema de fases: Fase 1 → Power-up → Fase 2
+    - Pontuação e estados do jogo
     """
 
-    # Estados possíveis do jogo
-    ESTADO_INICIO    = "inicio"
-    ESTADO_JOGANDO   = "jogando"
-    ESTADO_GAMEOVER  = "gameover"
+    ESTADO_INICIO   = "inicio"
+    ESTADO_JOGANDO  = "jogando"
+    ESTADO_GAMEOVER = "gameover"
 
     def __init__(self, tela: pygame.Surface):
         self.tela  = tela
         self.clock = pygame.time.Clock()
         self.hud   = HUD(tela)
 
-        # --- Gera estrelas fixas para o fundo ---
-        # Cada estrela é (x, y, raio, brilho) — brilho varia para cintilação
+        # --- Campo de estrelas fixo (gerado uma vez) ---
         self._estrelas = [
             (
                 random.randint(0, SCREEN_WIDTH),
                 random.randint(0, SCREEN_HEIGHT),
-                random.choice([1, 1, 1, 2]),         # Raio (maioria pequeno)
-                random.randint(120, 255)              # Brilho inicial
+                random.choice([1, 1, 1, 2]),
+                random.randint(120, 255)
             )
             for _ in range(NUM_STARS)
         ]
 
-        # Inicializa o estado e as variáveis do jogo
         self._reiniciar()
 
     # -------------------------------------------------------------------------
@@ -59,26 +58,28 @@ class Game:
     # -------------------------------------------------------------------------
 
     def _reiniciar(self):
-        """(Re)inicializa todos os grupos de sprites e variáveis de estado."""
+        """Reinicia todos os grupos de sprites e variáveis de estado."""
 
-        # --- Grupos de sprites ---
-        self.grupo_jogador   = pygame.sprite.GroupSingle()
-        self.grupo_balas     = pygame.sprite.Group()
+        # Grupos de sprites
+        self.grupo_jogador    = pygame.sprite.GroupSingle()
+        self.grupo_balas      = pygame.sprite.Group()
         self.grupo_asteroides = pygame.sprite.Group()
+        self.grupo_powerups   = pygame.sprite.Group()
 
-        # Cria o jogador e adiciona ao grupo
+        # Cria e posiciona o jogador
         self.jogador = Player()
         self.grupo_jogador.add(self.jogador)
 
-        # --- Variáveis de controle ---
-        self.pontuacao      = 0          # Pontuação atual
+        # Variáveis de controle
+        self.pontuacao      = 0
         self.estado         = self.ESTADO_INICIO
-        self.frame_contador = 0          # Contador geral de frames
+        self.frame_contador = 0
+        self.fase           = 1                  # Fase atual (1 ou 2)
+        self._powerup_gerado = False             # Garante apenas 1 power-up por partida
+        self._banner_timer   = 0                 # Frames restantes do banner de transição
+        self._spawn_timer    = 0
 
-        # Timer de spawn (conta quantos frames faltam para o próximo asteroide)
-        self._spawn_timer = 0
-
-        # Partículas de explosão (lista de dicts com pos, vel, vida, cor)
+        # Partículas de explosão
         self._particulas = []
 
     # -------------------------------------------------------------------------
@@ -86,117 +87,148 @@ class Game:
     # -------------------------------------------------------------------------
 
     def run(self):
-        """Executa o loop principal do jogo até o usuário fechar a janela."""
+        """Executa o loop principal até o jogador fechar a janela."""
         rodando = True
         while rodando:
-            # --- Processa eventos de sistema ---
             for evento in pygame.event.get():
                 if evento.type == pygame.QUIT:
                     rodando = False
                 if evento.type == pygame.KEYDOWN:
                     self._tratar_tecla(evento.key)
 
-            # --- Atualiza a lógica conforme o estado atual ---
             if self.estado == self.ESTADO_JOGANDO:
                 self._atualizar()
 
-            # --- Renderiza o frame ---
             self._renderizar()
-
-            # Incrementa contador de frames e mantém FPS estável
             self.frame_contador += 1
             self.clock.tick(FPS)
 
     # -------------------------------------------------------------------------
-    # Tratamento de teclas globais
+    # Teclas de estado
     # -------------------------------------------------------------------------
 
     def _tratar_tecla(self, tecla: int):
-        """Trata teclas que mudam o estado do jogo."""
+        """Trata transições de estado via teclado."""
         if self.estado == self.ESTADO_INICIO and tecla == pygame.K_SPACE:
-            # Inicia o jogo
             self.estado = self.ESTADO_JOGANDO
 
         elif self.estado == self.ESTADO_GAMEOVER:
             if tecla == pygame.K_r:
-                # Reinicia o jogo do zero
                 self._reiniciar()
                 self.estado = self.ESTADO_JOGANDO
             elif tecla == pygame.K_ESCAPE:
                 pygame.event.post(pygame.event.Event(pygame.QUIT))
 
     # -------------------------------------------------------------------------
-    # Atualização da lógica do jogo
+    # Atualização da lógica
     # -------------------------------------------------------------------------
 
     def _atualizar(self):
         """Atualiza todos os elementos do jogo em um frame."""
 
-        # --- Obtém teclas pressionadas e atualiza o jogador ---
+        # --- Jogador ---
         teclas = pygame.key.get_pressed()
         self.jogador.update(teclas, self.grupo_balas)
 
-        # --- Calcula velocidade atual dos asteroides (dificuldade progressiva) ---
-        velocidade_atual = ASTEROID_BASE_SPEED + self.pontuacao * ASTEROID_SPEED_INCREMENT
+        # --- Velocidade atual dos asteroides (Fase 1 ou 2) ---
+        bonus_fase = FASE2_SPEED_BONUS if self.fase == 2 else 0.0
+        velocidade_atual = (ASTEROID_BASE_SPEED + bonus_fase
+                            + self.pontuacao * ASTEROID_SPEED_INCREMENT)
 
         # --- Spawn de asteroides ---
-        # O intervalo entre spawns diminui conforme a pontuação sobe
         intervalo_spawn = max(
             ASTEROID_SPAWN_RATE_MIN,
             int(ASTEROID_SPAWN_RATE - self.pontuacao * ASTEROID_SPAWN_REDUCE)
         )
         self._spawn_timer += 1
         if self._spawn_timer >= intervalo_spawn:
-            novo = Asteroid(velocidade_atual)
+            novo = Asteroid(velocidade_atual, fase=self.fase)
             self.grupo_asteroides.add(novo)
             self._spawn_timer = 0
 
-        # --- Atualiza projéteis e asteroides ---
+        # --- Spawn do power-up (só uma vez, ao atingir POWERUP_TRIGGER pontos) ---
+        if (not self._powerup_gerado and self.fase == 1
+                and self.pontuacao >= POWERUP_TRIGGER):
+            pu = Powerup()
+            self.grupo_powerups.add(pu)
+            self._powerup_gerado = True
+
+        # --- Atualiza sprites ---
         self.grupo_balas.update()
         self.grupo_asteroides.update()
+        self.grupo_powerups.update()
 
-        # --- Detecção de colisão: projétil × asteroide ---
+        # --- Colisão: projétil × asteroide ---
+        # Não remove o asteroide diretamente — chama receber_dano()
         colisoes = pygame.sprite.groupcollide(
             self.grupo_balas, self.grupo_asteroides,
-            True, True  # Remove ambos ao colidir
+            True, False   # Remove a bala, mas NÃO o asteroide ainda
         )
-        for bala, asteroides_atingidos in colisoes.items():
+        for _bala, asteroides_atingidos in colisoes.items():
             for ast in asteroides_atingidos:
-                self.pontuacao += 1  # Soma 1 ponto por asteroide destruído
-                self._criar_explosao(ast.rect.center, ast.raio)
+                destruido = ast.receber_dano()
+                if destruido:
+                    self.pontuacao += 1
+                    self._criar_explosao(ast.rect.center, ast.raio)
+                    ast.kill()   # Remove o asteroide destruído
 
-        # --- Detecção de colisão: nave × asteroide ---
-        if pygame.sprite.spritecollide(self.jogador, self.grupo_asteroides, False,
-                                        pygame.sprite.collide_circle_ratio(0.75)):
+        # --- Colisão: nave × power-up ---
+        coletados = pygame.sprite.spritecollide(
+            self.jogador, self.grupo_powerups, True
+        )
+        if coletados:
+            self._ativar_fase2()
+
+        # --- Remove power-ups que saíram da tela ---
+        for pu in list(self.grupo_powerups):
+            if pu.saiu_da_tela:
+                pu.kill()
+
+        # --- Colisão: nave × asteroide → Game Over ---
+        if pygame.sprite.spritecollide(
+            self.jogador, self.grupo_asteroides, False,
+            pygame.sprite.collide_circle_ratio(0.75)
+        ):
             self._criar_explosao(self.jogador.rect.center, 30)
             self.estado = self.ESTADO_GAMEOVER
 
-        # --- Asteroide saiu pelo fundo da tela → Game Over ---
+        # --- Asteroide saiu pelo fundo → Game Over ---
         for ast in list(self.grupo_asteroides):
             if ast.saiu_da_tela:
                 self.estado = self.ESTADO_GAMEOVER
                 break
 
-        # --- Atualiza partículas de explosão ---
+        # --- Atualiza partículas e banner ---
         self._atualizar_particulas()
+        if self._banner_timer > 0:
+            self._banner_timer -= 1
 
     # -------------------------------------------------------------------------
-    # Sistema de partículas de explosão
+    # Ativação da Fase 2
+    # -------------------------------------------------------------------------
+
+    def _ativar_fase2(self):
+        """Ativa a Fase 2: duplo canhão na nave e asteroides mais resistentes."""
+        self.fase = 2
+        self.jogador.ativar_duplo_canhao()
+        self._banner_timer = 180   # Banner visível por 3 segundos (180 frames)
+
+    # -------------------------------------------------------------------------
+    # Partículas de explosão
     # -------------------------------------------------------------------------
 
     def _criar_explosao(self, centro: tuple, raio: int):
-        """Cria partículas de explosão no ponto de impacto."""
-        num = raio * 2  # Mais partículas para asteroides maiores
+        """Gera partículas de explosão no ponto de impacto."""
+        num = raio * 2
         for _ in range(num):
             angulo = random.uniform(0, 360)
             speed  = random.uniform(1, raio * 0.3)
-            import math
             vx = math.cos(math.radians(angulo)) * speed
             vy = math.sin(math.radians(angulo)) * speed
             cor = random.choice([
-                (255, 200, 50),   # Amarelo
-                (255, 120, 30),   # Laranja
-                (255, 255, 255),  # Branco
+                (255, 200, 50),
+                (255, 120, 30),
+                (255, 255, 255),
             ])
             self._particulas.append({
                 "x":    float(centro[0]),
@@ -209,12 +241,12 @@ class Game:
             })
 
     def _atualizar_particulas(self):
-        """Move e envelhece cada partícula; remove as que expiraram."""
+        """Move e envelhece as partículas; remove as expiradas."""
         vivas = []
         for p in self._particulas:
             p["x"]    += p["vx"]
             p["y"]    += p["vy"]
-            p["vy"]   += 0.15   # Gravidade leve
+            p["vy"]   += 0.15
             p["vida"] -= 1
             if p["vida"] > 0:
                 vivas.append(p)
@@ -225,54 +257,55 @@ class Game:
     # -------------------------------------------------------------------------
 
     def _renderizar(self):
-        """Desenha todos os elementos na tela."""
-
-        # --- Fundo preto ---
+        """Desenha todos os elementos na tela a cada frame."""
         self.tela.fill(COLOR_BG)
-
-        # --- Estrelas do fundo ---
         self._desenhar_estrelas()
 
         if self.estado == self.ESTADO_INICIO:
-            # Desenha apenas o HUD de início
             self.hud.desenhar_tela_inicio(self.frame_contador)
 
         else:
-            # --- Sprites do jogo ---
+            # Sprites
             self.grupo_asteroides.draw(self.tela)
+            self.grupo_powerups.draw(self.tela)
             self.grupo_balas.draw(self.tela)
             self.grupo_jogador.draw(self.tela)
 
-            # --- Partículas de explosão ---
+            # Partículas
             self._desenhar_particulas()
 
-            # --- HUD: pontuação e velocidade ---
-            self.hud.desenhar_hud(self.pontuacao)
+            # HUD (com estado de fase e banner)
+            self.hud.desenhar_hud(
+                self.pontuacao,
+                fase=self.fase,
+                duplo_canhao=self.jogador.duplo_canhao,
+                banner_timer=self._banner_timer
+            )
 
-            # --- Tela de Game Over (sobreposta) ---
+            # Game Over
             if self.estado == self.ESTADO_GAMEOVER:
-                self.hud.desenhar_game_over(self.pontuacao, self.frame_contador)
+                self.hud.desenhar_game_over(
+                    self.pontuacao,
+                    self.frame_contador,
+                    fase=self.fase
+                )
 
-        # Atualiza o display
         pygame.display.flip()
 
     def _desenhar_estrelas(self):
-        """Desenha o campo de estrelas com efeito sutil de cintilação."""
+        """Campo de estrelas com cintilação senoidal."""
         for i, (x, y, raio, brilho_base) in enumerate(self._estrelas):
-            # Cintilação: oscila o brilho de forma senoidal por índice
-            import math
-            brilho = int(brilho_base * (0.7 + 0.3 * math.sin(self.frame_contador * 0.03 + i)))
+            brilho = int(brilho_base * (0.7 + 0.3 * math.sin(
+                self.frame_contador * 0.03 + i)))
             brilho = max(60, min(255, brilho))
-            cor = (brilho, brilho, min(255, brilho + 20))  # Levemente azulado
+            cor    = (brilho, brilho, min(255, brilho + 20))
             pygame.draw.circle(self.tela, cor, (x, y), raio)
 
     def _desenhar_particulas(self):
-        """Desenha as partículas de explosão com fade-out."""
+        """Partículas de explosão com fade-out por alpha."""
         for p in self._particulas:
-            # Opacidade diminui conforme a vida acaba
-            alpha = int(255 * (p["vida"] / 35))
-            alpha = max(0, min(255, alpha))
+            alpha    = max(0, min(255, int(255 * p["vida"] / 35)))
             cor_fade = (*p["cor"][:3], alpha)
-            surf = pygame.Surface((p["raio"] * 2, p["raio"] * 2), pygame.SRCALPHA)
+            surf     = pygame.Surface((p["raio"] * 2, p["raio"] * 2), pygame.SRCALPHA)
             pygame.draw.circle(surf, cor_fade, (p["raio"], p["raio"]), p["raio"])
             self.tela.blit(surf, (int(p["x"]) - p["raio"], int(p["y"]) - p["raio"]))
